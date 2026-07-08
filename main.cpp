@@ -11,14 +11,16 @@ using namespace std;
  * Problem 015 - File Storage
  * Implementation: Disk-based Hash Table with Chaining.
  * 
- * Optimization: 
- * 1. Switched from fstream to C-style FILE* for faster binary I/O.
- * 2. Cached the bucket array in memory.
- * 3. Minimized seek operations.
+ * Optimizations:
+ * 1. Reduced NUM_BUCKETS to save memory and avoid MLE.
+ * 2. Used a power-of-two bucket size for faster modulo (bitmask).
+ * 3. Used C-style FILE* for binary I/O.
+ * 4. Minimized memory allocations in the find loop.
  */
 
 const char* DB_FILE = "storage.db";
-const int NUM_BUCKETS = 100003; 
+const int NUM_BUCKETS = 65536; // Power of 2 to save memory and speed up hashing
+const int BUCKET_MASK = NUM_BUCKETS - 1;
 const int MAX_INDEX_LEN = 64;
 
 struct Entry {
@@ -29,53 +31,51 @@ struct Entry {
 
 class FileStorage {
     FILE* fp;
-    vector<long long> bucket_cache;
+    long long* bucket_cache;
 
     size_t hash_fn(const string& s) {
         size_t h = 5381;
         for (char c : s) h = ((h << 5) + h) + (unsigned char)c;
-        return h % NUM_BUCKETS;
+        return h & BUCKET_MASK;
     }
 
 public:
-    FileStorage() : bucket_cache(NUM_BUCKETS, -1) {
+    FileStorage() {
+        bucket_cache = new long long[NUM_BUCKETS];
         fp = fopen(DB_FILE, "rb+");
         if (!fp) {
-            // Initialize new database
             fp = fopen(DB_FILE, "wb+");
-            vector<long long> initial_buckets(NUM_BUCKETS, -1);
-            fwrite(initial_buckets.data(), sizeof(long long), NUM_BUCKETS, fp);
+            for (int i = 0; i < NUM_BUCKETS; ++i) bucket_cache[i] = -1;
+            fwrite(bucket_cache, sizeof(long long), NUM_BUCKETS, fp);
             rewind(fp);
         } else {
-            // Load bucket array into cache
-            fread(bucket_cache.data(), sizeof(long long), NUM_BUCKETS, fp);
+            fread(bucket_cache, sizeof(long long), NUM_BUCKETS, fp);
         }
     }
 
     ~FileStorage() {
         if (fp) {
             fseek(fp, 0, SEEK_SET);
-            fwrite(bucket_cache.data(), sizeof(long long), NUM_BUCKETS, fp);
+            fwrite(bucket_cache, sizeof(long long), NUM_BUCKETS, fp);
             fclose(fp);
         }
+        delete[] bucket_cache;
     }
 
     void insert(const string& index, int value) {
         size_t bucket = hash_fn(index);
         long long current_offset = bucket_cache[bucket];
 
-        // Check if (index, value) already exists
         while (current_offset != -1) {
             fseek(fp, current_offset, SEEK_SET);
             Entry e;
-            fread(&e, sizeof(Entry), 1, fp);
+            if (fread(&e, sizeof(Entry), 1, fp) != 1) break;
             if (strcmp(e.index, index.c_str()) == 0 && e.value == value) {
-                return; // Already exists
+                return; 
             }
             current_offset = e.next_offset;
         }
 
-        // Append new entry to the end of the file
         fseek(fp, 0, SEEK_END);
         long long new_offset = ftell(fp);
         
@@ -86,8 +86,6 @@ public:
         new_entry.next_offset = bucket_cache[bucket];
         
         fwrite(&new_entry, sizeof(Entry), 1, fp);
-        
-        // Update bucket head in cache
         bucket_cache[bucket] = new_offset;
     }
 
@@ -99,13 +97,13 @@ public:
         while (current_offset != -1) {
             fseek(fp, current_offset, SEEK_SET);
             Entry e;
-            fread(&e, sizeof(Entry), 1, fp);
+            if (fread(&e, sizeof(Entry), 1, fp) != 1) break;
 
             if (strcmp(e.index, index.c_str()) == 0 && e.value == value) {
                 if (prev_offset == -1) {
                     bucket_cache[bucket] = e.next_offset;
                 } else {
-                    fseek(fp, prev_offset + offsetof(Entry, next_offset), SEEK_SET);
+                    fseek(fp, prev_offset + (long long)offsetof(Entry, next_offset), SEEK_SET);
                     fwrite(&e.next_offset, sizeof(long long), 1, fp);
                 }
                 return;
@@ -123,7 +121,7 @@ public:
         while (current_offset != -1) {
             fseek(fp, current_offset, SEEK_SET);
             Entry e;
-            fread(&e, sizeof(Entry), 1, fp);
+            if (fread(&e, sizeof(Entry), 1, fp) != 1) break;
             if (strcmp(e.index, index.c_str()) == 0) {
                 results.push_back(e.value);
             }
