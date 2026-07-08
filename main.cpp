@@ -10,19 +10,18 @@ using namespace std;
 
 /**
  * Problem 015 - File Storage
- * Implementation: Disk-based Hash Table with Chaining and Page Caching.
+ * Implementation: Disk-based Hash Table with Chaining.
  * 
  * Optimizations:
- * 1. Page Cache: Read/Write data in 4KB pages to minimize fseek and I/O overhead.
- * 2. Power-of-two bucket size for fast masking.
- * 3. C-style I/O for performance.
+ * 1. Use a large internal buffer via setvbuf to reduce syscalls.
+ * 2. Direct Entry reading to avoid page-boundary issues.
+ * 3. Power-of-two bucket size for fast masking.
  */
 
 const char* DB_FILE = "storage.db";
 const int NUM_BUCKETS = 131072; 
 const int BUCKET_MASK = NUM_BUCKETS - 1;
 const int MAX_INDEX_LEN = 64;
-const int PAGE_SIZE = 4096;
 
 struct Entry {
     char index[MAX_INDEX_LEN + 1];
@@ -33,29 +32,6 @@ struct Entry {
 class FileStorage {
     FILE* fp;
     long long* bucket_cache;
-    
-    // Page cache members
-    char page_buffer[PAGE_SIZE];
-    long long current_page_offset;
-
-    void read_page(long long offset) {
-        if (offset < 0) return;
-        current_page_offset = (offset / PAGE_SIZE) * PAGE_SIZE;
-        fseek(fp, current_page_offset, SEEK_SET);
-        fread(page_buffer, 1, PAGE_SIZE, fp);
-    }
-
-    Entry* get_entry_from_cache(long long offset) {
-        if (offset < 0) return nullptr;
-        if (offset >= current_page_offset && offset < current_page_offset + PAGE_SIZE) {
-            return (Entry*)(page_buffer + (offset - current_page_offset));
-        }
-        read_page(offset);
-        if (offset >= current_page_offset && offset < current_page_offset + PAGE_SIZE) {
-            return (Entry*)(page_buffer + (offset - current_page_offset));
-        }
-        return nullptr;
-    }
 
     size_t hash_fn(const string& s) {
         size_t h = 5381;
@@ -63,8 +39,18 @@ class FileStorage {
         return h & BUCKET_MASK;
     }
 
+    void read_entry(long long offset, Entry& e) {
+        fseek(fp, offset, SEEK_SET);
+        fread(&e, sizeof(Entry), 1, fp);
+    }
+
+    void write_entry(long long offset, const Entry& e) {
+        fseek(fp, offset, SEEK_SET);
+        fwrite(&e, sizeof(Entry), 1, fp);
+    }
+
 public:
-    FileStorage() : current_page_offset(-1) {
+    FileStorage() {
         bucket_cache = new long long[NUM_BUCKETS];
         fp = fopen(DB_FILE, "rb+");
         if (!fp) {
@@ -75,6 +61,8 @@ public:
         } else {
             fread(bucket_cache, sizeof(long long), NUM_BUCKETS, fp);
         }
+        // Increase buffer size to reduce I/O overhead
+        setvbuf(fp, NULL, _IOFBF, 65536);
     }
 
     ~FileStorage() {
@@ -90,13 +78,13 @@ public:
         size_t bucket = hash_fn(index);
         long long current_offset = bucket_cache[bucket];
 
+        Entry e;
         while (current_offset != -1) {
-            Entry* e = get_entry_from_cache(current_offset);
-            if (!e) break;
-            if (strcmp(e->index, index.c_str()) == 0 && e->value == value) {
+            read_entry(current_offset, e);
+            if (strcmp(e.index, index.c_str()) == 0 && e.value == value) {
                 return; 
             }
-            current_offset = e->next_offset;
+            current_offset = e.next_offset;
         }
 
         fseek(fp, 0, SEEK_END);
@@ -108,7 +96,7 @@ public:
         new_entry.value = value;
         new_entry.next_offset = bucket_cache[bucket];
         
-        fwrite(&new_entry, sizeof(Entry), 1, fp);
+        write_entry(new_offset, new_entry);
         bucket_cache[bucket] = new_offset;
     }
 
@@ -117,23 +105,23 @@ public:
         long long current_offset = bucket_cache[bucket];
         long long prev_offset = -1;
 
+        Entry e;
         while (current_offset != -1) {
-            Entry* e = get_entry_from_cache(current_offset);
-            if (!e) break;
+            read_entry(current_offset, e);
 
-            if (strcmp(e->index, index.c_str()) == 0 && e->value == value) {
+            if (strcmp(e.index, index.c_str()) == 0 && e.value == value) {
                 if (prev_offset == -1) {
-                    bucket_cache[bucket] = e->next_offset;
+                    bucket_cache[bucket] = e.next_offset;
                 } else {
-                    // Update the next_offset of the previous entry
-                    // Since we need to write a specific field, we seek and write
-                    fseek(fp, prev_offset + offsetof(Entry, next_offset), SEEK_SET);
-                    fwrite(&e->next_offset, sizeof(long long), 1, fp);
+                    Entry prev_e;
+                    read_entry(prev_offset, prev_e);
+                    prev_e.next_offset = e.next_offset;
+                    write_entry(prev_offset, prev_e);
                 }
                 return;
             }
             prev_offset = current_offset;
-            current_offset = e->next_offset;
+            current_offset = e.next_offset;
         }
     }
 
@@ -142,13 +130,13 @@ public:
         long long current_offset = bucket_cache[bucket];
         vector<int> results;
 
+        Entry e;
         while (current_offset != -1) {
-            Entry* e = get_entry_from_cache(current_offset);
-            if (!e) break;
-            if (strcmp(e->index, index.c_str()) == 0) {
-                results.push_back(e->value);
+            read_entry(current_offset, e);
+            if (strcmp(e.index, index.c_str()) == 0) {
+                results.push_back(e.value);
             }
-            current_offset = e->next_offset;
+            current_offset = e.next_offset;
         }
 
         if (results.empty()) {
