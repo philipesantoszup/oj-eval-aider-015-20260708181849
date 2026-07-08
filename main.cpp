@@ -2,7 +2,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
-#include <fstream>
+#include <cstdio>
 #include <cstring>
 
 using namespace std;
@@ -11,10 +11,13 @@ using namespace std;
  * Problem 015 - File Storage
  * Implementation: Disk-based Hash Table with Chaining.
  * 
- * Optimization: Cache the bucket array in memory to reduce disk I/O.
+ * Optimization: 
+ * 1. Switched from fstream to C-style FILE* for faster binary I/O.
+ * 2. Cached the bucket array in memory.
+ * 3. Minimized seek operations.
  */
 
-const string DB_FILE = "storage.db";
+const char* DB_FILE = "storage.db";
 const int NUM_BUCKETS = 100003; 
 const int MAX_INDEX_LEN = 64;
 
@@ -25,38 +28,35 @@ struct Entry {
 };
 
 class FileStorage {
-    fstream file;
+    FILE* fp;
     vector<long long> bucket_cache;
 
     size_t hash_fn(const string& s) {
         size_t h = 5381;
-        for (char c : s) h = ((h << 5) + h) + c;
+        for (char c : s) h = ((h << 5) + h) + (unsigned char)c;
         return h % NUM_BUCKETS;
     }
 
 public:
     FileStorage() : bucket_cache(NUM_BUCKETS, -1) {
-        file.open(DB_FILE, ios::in | ios::out | ios::binary);
-        if (!file) {
+        fp = fopen(DB_FILE, "rb+");
+        if (!fp) {
             // Initialize new database
-            file.open(DB_FILE, ios::out | ios::binary);
+            fp = fopen(DB_FILE, "wb+");
             vector<long long> initial_buckets(NUM_BUCKETS, -1);
-            file.write(reinterpret_cast<const char*>(initial_buckets.data()), NUM_BUCKETS * sizeof(long long));
-            file.close();
-            file.open(DB_FILE, ios::in | ios::out | ios::binary);
+            fwrite(initial_buckets.data(), sizeof(long long), NUM_BUCKETS, fp);
+            rewind(fp);
         } else {
             // Load bucket array into cache
-            file.seekg(0, ios::beg);
-            file.read(reinterpret_cast<char*>(bucket_cache.data()), NUM_BUCKETS * sizeof(long long));
+            fread(bucket_cache.data(), sizeof(long long), NUM_BUCKETS, fp);
         }
     }
 
     ~FileStorage() {
-        if (file.is_open()) {
-            // Sync cache back to disk
-            file.seekp(0, ios::beg);
-            file.write(reinterpret_cast<const char*>(bucket_cache.data()), NUM_BUCKETS * sizeof(long long));
-            file.close();
+        if (fp) {
+            fseek(fp, 0, SEEK_SET);
+            fwrite(bucket_cache.data(), sizeof(long long), NUM_BUCKETS, fp);
+            fclose(fp);
         }
     }
 
@@ -66,9 +66,9 @@ public:
 
         // Check if (index, value) already exists
         while (current_offset != -1) {
-            file.seekg(current_offset);
+            fseek(fp, current_offset, SEEK_SET);
             Entry e;
-            file.read(reinterpret_cast<char*>(&e), sizeof(Entry));
+            fread(&e, sizeof(Entry), 1, fp);
             if (strcmp(e.index, index.c_str()) == 0 && e.value == value) {
                 return; // Already exists
             }
@@ -76,18 +76,16 @@ public:
         }
 
         // Append new entry to the end of the file
-        file.seekp(0, ios::end);
-        long long new_offset = file.tellp();
+        fseek(fp, 0, SEEK_END);
+        long long new_offset = ftell(fp);
         
         Entry new_entry;
         memset(new_entry.index, 0, sizeof(new_entry.index));
         strncpy(new_entry.index, index.c_str(), MAX_INDEX_LEN);
         new_entry.value = value;
-        
-        // New entry points to the old head of the bucket
         new_entry.next_offset = bucket_cache[bucket];
         
-        file.write(reinterpret_cast<const char*>(&new_entry), sizeof(Entry));
+        fwrite(&new_entry, sizeof(Entry), 1, fp);
         
         // Update bucket head in cache
         bucket_cache[bucket] = new_offset;
@@ -99,18 +97,16 @@ public:
         long long prev_offset = -1;
 
         while (current_offset != -1) {
-            file.seekg(current_offset);
+            fseek(fp, current_offset, SEEK_SET);
             Entry e;
-            file.read(reinterpret_cast<char*>(&e), sizeof(Entry));
+            fread(&e, sizeof(Entry), 1, fp);
 
             if (strcmp(e.index, index.c_str()) == 0 && e.value == value) {
                 if (prev_offset == -1) {
-                    // Removing the head
                     bucket_cache[bucket] = e.next_offset;
                 } else {
-                    // Removing from middle/end
-                    file.seekp(prev_offset + offsetof(Entry, next_offset));
-                    file.write(reinterpret_cast<const char*>(&e.next_offset), sizeof(long long));
+                    fseek(fp, prev_offset + offsetof(Entry, next_offset), SEEK_SET);
+                    fwrite(&e.next_offset, sizeof(long long), 1, fp);
                 }
                 return;
             }
@@ -125,9 +121,9 @@ public:
         vector<int> results;
 
         while (current_offset != -1) {
-            file.seekg(current_offset);
+            fseek(fp, current_offset, SEEK_SET);
             Entry e;
-            file.read(reinterpret_cast<char*>(&e), sizeof(Entry));
+            fread(&e, sizeof(Entry), 1, fp);
             if (strcmp(e.index, index.c_str()) == 0) {
                 results.push_back(e.value);
             }
@@ -135,39 +131,35 @@ public:
         }
 
         if (results.empty()) {
-            cout << "null" << endl;
+            printf("null\n");
         } else {
             sort(results.begin(), results.end());
             for (size_t i = 0; i < results.size(); ++i) {
-                cout << results[i] << (i == results.size() - 1 ? "" : " ");
+                printf("%d%c", results[i], (i == results.size() - 1 ? '\n' : ' '));
             }
-            cout << endl;
         }
     }
 };
 
 int main() {
-    ios_base::sync_with_stdio(false);
-    cin.tie(NULL);
-
     int n;
-    if (!(cin >> n)) return 0;
+    if (scanf("%d", &n) != 1) return 0;
 
     FileStorage db;
-    string cmd, index;
+    char cmd[20], index_buf[MAX_INDEX_LEN + 1];
     int value;
 
     for (int i = 0; i < n; ++i) {
-        if (!(cin >> cmd)) break;
-        if (cmd == "insert") {
-            cin >> index >> value;
-            db.insert(index, value);
-        } else if (cmd == "delete") {
-            cin >> index >> value;
-            db.remove(index, value);
-        } else if (cmd == "find") {
-            cin >> index;
-            db.find(index);
+        if (scanf("%s", cmd) != 1) break;
+        if (strcmp(cmd, "insert") == 0) {
+            scanf("%s %d", index_buf, &value);
+            db.insert(index_buf, value);
+        } else if (strcmp(cmd, "delete") == 0) {
+            scanf("%s %d", index_buf, &value);
+            db.remove(index_buf, value);
+        } else if (strcmp(cmd, "find") == 0) {
+            scanf("%s", index_buf);
+            db.find(index_buf);
         }
     }
 
