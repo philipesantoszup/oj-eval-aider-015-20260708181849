@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <cstddef>
 
 using namespace std;
 
@@ -12,14 +13,14 @@ using namespace std;
  * Implementation: Disk-based Hash Table with Chaining.
  * 
  * Optimizations:
- * 1. Reduced NUM_BUCKETS to save memory and avoid MLE.
+ * 1. Increased NUM_BUCKETS to 131072 to reduce chain length and TLE.
  * 2. Used a power-of-two bucket size for faster modulo (bitmask).
- * 3. Used C-style FILE* for binary I/O.
- * 4. Minimized memory allocations in the find loop.
+ * 3. Used C-style FILE* with a larger buffer via setvbuf.
+ * 4. Minimized memory allocations.
  */
 
 const char* DB_FILE = "storage.db";
-const int NUM_BUCKETS = 65536; // Power of 2 to save memory and speed up hashing
+const int NUM_BUCKETS = 131072; // Increased to reduce collisions
 const int BUCKET_MASK = NUM_BUCKETS - 1;
 const int MAX_INDEX_LEN = 64;
 
@@ -32,6 +33,7 @@ struct Entry {
 class FileStorage {
     FILE* fp;
     long long* bucket_cache;
+    char io_buffer[65536]; // Buffer for setvbuf
 
     size_t hash_fn(const string& s) {
         size_t h = 5381;
@@ -51,6 +53,7 @@ public:
         } else {
             fread(bucket_cache, sizeof(long long), NUM_BUCKETS, fp);
         }
+        setvbuf(fp, io_buffer, _IOFBF, sizeof(io_buffer));
     }
 
     ~FileStorage() {
@@ -103,7 +106,7 @@ public:
                 if (prev_offset == -1) {
                     bucket_cache[bucket] = e.next_offset;
                 } else {
-                    fseek(fp, prev_offset + (long long)offsetof(Entry, next_offset), SEEK_SET);
+                    fseek(fp, prev_offset + offsetof(Entry, next_offset), SEEK_SET);
                     fwrite(&e.next_offset, sizeof(long long), 1, fp);
                 }
                 return;
