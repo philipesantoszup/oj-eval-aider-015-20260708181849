@@ -11,13 +11,11 @@ using namespace std;
  * Problem 015 - File Storage
  * Implementation: Disk-based Hash Table with Chaining.
  * 
- * File Structure:
- * [Header: Bucket Array (NUM_BUCKETS * sizeof(long long))]
- * [Data Blocks: Entry { char index[65], int value, long long next_offset }]
+ * Optimization: Cache the bucket array in memory to reduce disk I/O.
  */
 
 const string DB_FILE = "storage.db";
-const int NUM_BUCKETS = 100003; // Prime number for hashing
+const int NUM_BUCKETS = 100003; 
 const int MAX_INDEX_LEN = 64;
 
 struct Entry {
@@ -28,6 +26,7 @@ struct Entry {
 
 class FileStorage {
     fstream file;
+    vector<long long> bucket_cache;
 
     size_t hash_fn(const string& s) {
         size_t h = 5381;
@@ -35,42 +34,35 @@ class FileStorage {
         return h % NUM_BUCKETS;
     }
 
-    long long get_bucket_offset(size_t bucket) {
-        return bucket * sizeof(long long);
-    }
-
-    void write_bucket(size_t bucket, long long offset) {
-        file.seekp(get_bucket_offset(bucket));
-        file.write(reinterpret_cast<const char*>(&offset), sizeof(long long));
-    }
-
-    long long read_bucket(size_t bucket) {
-        file.seekg(get_bucket_offset(bucket));
-        long long offset;
-        file.read(reinterpret_cast<char*>(&offset), sizeof(long long));
-        return offset;
-    }
-
 public:
-    FileStorage() {
+    FileStorage() : bucket_cache(NUM_BUCKETS, -1) {
         file.open(DB_FILE, ios::in | ios::out | ios::binary);
         if (!file) {
             // Initialize new database
             file.open(DB_FILE, ios::out | ios::binary);
-            vector<long long> buckets(NUM_BUCKETS, -1);
-            file.write(reinterpret_cast<const char*>(buckets.data()), NUM_BUCKETS * sizeof(long long));
+            vector<long long> initial_buckets(NUM_BUCKETS, -1);
+            file.write(reinterpret_cast<const char*>(initial_buckets.data()), NUM_BUCKETS * sizeof(long long));
             file.close();
             file.open(DB_FILE, ios::in | ios::out | ios::binary);
+        } else {
+            // Load bucket array into cache
+            file.seekg(0, ios::beg);
+            file.read(reinterpret_cast<char*>(bucket_cache.data()), NUM_BUCKETS * sizeof(long long));
         }
     }
 
     ~FileStorage() {
-        if (file.is_open()) file.close();
+        if (file.is_open()) {
+            // Sync cache back to disk
+            file.seekp(0, ios::beg);
+            file.write(reinterpret_cast<const char*>(bucket_cache.data()), NUM_BUCKETS * sizeof(long long));
+            file.close();
+        }
     }
 
     void insert(const string& index, int value) {
         size_t bucket = hash_fn(index);
-        long long current_offset = read_bucket(bucket);
+        long long current_offset = bucket_cache[bucket];
 
         // Check if (index, value) already exists
         while (current_offset != -1) {
@@ -88,23 +80,22 @@ public:
         long long new_offset = file.tellp();
         
         Entry new_entry;
+        memset(new_entry.index, 0, sizeof(new_entry.index));
         strncpy(new_entry.index, index.c_str(), MAX_INDEX_LEN);
-        new_entry.index[MAX_INDEX_LEN] = '\0';
         new_entry.value = value;
         
         // New entry points to the old head of the bucket
-        long long old_head = read_bucket(bucket);
-        new_entry.next_offset = old_head;
+        new_entry.next_offset = bucket_cache[bucket];
         
         file.write(reinterpret_cast<const char*>(&new_entry), sizeof(Entry));
         
-        // Update bucket head
-        write_bucket(bucket, new_offset);
+        // Update bucket head in cache
+        bucket_cache[bucket] = new_offset;
     }
 
     void remove(const string& index, int value) {
         size_t bucket = hash_fn(index);
-        long long current_offset = read_bucket(bucket);
+        long long current_offset = bucket_cache[bucket];
         long long prev_offset = -1;
 
         while (current_offset != -1) {
@@ -115,7 +106,7 @@ public:
             if (strcmp(e.index, index.c_str()) == 0 && e.value == value) {
                 if (prev_offset == -1) {
                     // Removing the head
-                    write_bucket(bucket, e.next_offset);
+                    bucket_cache[bucket] = e.next_offset;
                 } else {
                     // Removing from middle/end
                     file.seekp(prev_offset + offsetof(Entry, next_offset));
@@ -130,7 +121,7 @@ public:
 
     void find(const string& index) {
         size_t bucket = hash_fn(index);
-        long long current_offset = read_bucket(bucket);
+        long long current_offset = bucket_cache[bucket];
         vector<int> results;
 
         while (current_offset != -1) {
@@ -167,7 +158,7 @@ int main() {
     int value;
 
     for (int i = 0; i < n; ++i) {
-        cin >> cmd;
+        if (!(cin >> cmd)) break;
         if (cmd == "insert") {
             cin >> index >> value;
             db.insert(index, value);
